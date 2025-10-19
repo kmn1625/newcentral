@@ -1,0 +1,712 @@
+# Complete Step-by-Step Jenkins Installation on AWS EC2
+
+## 📋 Table of Contents
+1. [AWS EC2 Setup](#step-1-aws-ec2-setup)
+2. [Security Group Configuration](#step-2-security-group-configuration)
+3. [Connect to EC2 Instance](#step-3-connect-to-ec2-instance)
+4. [Install Docker & Docker Compose](#step-4-install-docker--docker-compose)
+5. [Create Jenkins Files](#step-5-create-jenkins-files)
+6. [Start Jenkins](#step-6-start-jenkins)
+7. [Access Jenkins in Browser](#step-7-access-jenkins-in-browser)
+8. [Complete Initial Setup](#step-8-complete-initial-setup)
+
+---
+
+## Step 1: AWS EC2 Setup
+
+### Launch EC2 Instance
+
+1. **Go to AWS EC2 Console**: https://console.aws.amazon.com/ec2/
+
+2. **Click "Launch Instance"**
+
+3. **Configure Instance**:
+   - **Name**: `jenkins-server`
+   - **AMI**: Ubuntu Server 22.04 LTS (or Amazon Linux 2023)
+   - **Instance Type**: `t2.medium` (minimum) or `t2.large` (recommended)
+   - **Key pair**: Create new or select existing
+   - **Storage**: 30 GB gp3
+
+4. **Click "Launch Instance"**
+
+5. **Wait for Instance State**: Running ✅
+
+6. **Note down**: Public IPv4 address (e.g., 54.123.45.67)
+
+---
+
+## Step 2: Security Group Configuration
+
+### Configure Inbound Rules
+
+1. **Select your EC2 instance**
+
+2. **Click on Security tab**
+
+3. **Click on Security Group link**
+
+4. **Click "Edit inbound rules"**
+
+5. **Add these rules**:
+
+| Type       | Protocol | Port Range | Source    | Description          |
+|------------|----------|------------|-----------|----------------------|
+| SSH        | TCP      | 22         | My IP     | SSH access           |
+| Custom TCP | TCP      | 8080       | 0.0.0.0/0 | Jenkins Web UI       |
+| Custom TCP | TCP      | 50000      | 0.0.0.0/0 | Jenkins Agent Port   |
+
+6. **Click "Save rules"**
+
+---
+
+## Step 3: Connect to EC2 Instance
+
+### For Windows Users (Using PuTTY or PowerShell)
+
+**Option A: Using PowerShell/CMD**
+```powershell
+ssh -i "path\to\your-key.pem" ubuntu@54.123.45.67
+```
+
+**Option B: Using PuTTY**
+1. Convert .pem to .ppk using PuTTYgen
+2. Open PuTTY
+3. Enter: ubuntu@54.123.45.67
+4. Load your .ppk key
+5. Click "Open"
+
+### For Mac/Linux Users
+
+```bash
+# Set correct permissions for key file
+chmod 400 ~/Downloads/your-key.pem
+
+# Connect to EC2
+ssh -i ~/Downloads/your-key.pem ubuntu@54.123.45.67
+```
+
+**Replace**: `54.123.45.67` with your actual EC2 public IP
+
+---
+
+## Step 4: Install Docker & Docker Compose
+
+### For Ubuntu 22.04 (Recommended)
+
+```bash
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install required packages
+sudo apt install -y apt-transport-https ca-certificates curl software-properties-common
+
+# Add Docker GPG key
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Add Docker repository
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update package list
+sudo apt update
+
+# Install Docker
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Start and enable Docker
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Add current user to docker group
+sudo usermod -aG docker $USER
+
+# Install Docker Compose (standalone)
+sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+# Verify installation
+docker --version
+docker-compose --version
+```
+
+### For Amazon Linux 2023
+
+```bash
+# Update system
+sudo yum update -y
+
+# Install Docker
+sudo yum install -y docker
+
+# Start Docker service
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Add user to docker group
+sudo usermod -a -G docker ec2-user
+
+# Install Docker Compose
+sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+# Verify installation
+docker --version
+docker-compose --version
+```
+
+### Important: Logout and Login Again
+
+```bash
+# Exit SSH session
+exit
+
+# Reconnect to EC2
+ssh -i ~/Downloads/your-key.pem ubuntu@54.123.45.67
+```
+
+This is necessary for docker group membership to take effect.
+
+---
+
+## Step 5: Create Jenkins Files
+
+### Create Project Directory
+
+```bash
+# Create directory
+mkdir -p ~/jenkins-docker
+cd ~/jenkins-docker
+
+# Verify you're in the right directory
+pwd
+# Should show: /home/ubuntu/jenkins-docker
+```
+
+### Create docker-compose.yml
+
+```bash
+nano docker-compose.yml
+```
+
+**Copy and paste this content**:
+
+```yaml
+version: '3.8'
+
+networks:
+  jenkins-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  jenkins-data:
+    driver: local
+  jenkins-docker-certs:
+    driver: local
+
+services:
+  docker-dind:
+    image: docker:24-dind
+    container_name: jenkins-docker
+    privileged: true
+    restart: unless-stopped
+    networks:
+      jenkins-network:
+        ipv4_address: 172.20.0.2
+        aliases:
+          - docker
+    ports:
+      - "2376:2376"
+    environment:
+      - DOCKER_TLS_CERTDIR=/certs
+    volumes:
+      - jenkins-docker-certs:/certs/client
+      - jenkins-data:/var/jenkins_home
+    command: --storage-driver=overlay2
+
+  jenkins:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jenkins-blueocean
+    restart: unless-stopped
+    networks:
+      jenkins-network:
+        ipv4_address: 172.20.0.3
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    environment:
+      - DOCKER_HOST=tcp://docker:2376
+      - DOCKER_CERT_PATH=/certs/client
+      - DOCKER_TLS_VERIFY=1
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=true
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      - jenkins-docker-certs:/certs/client:ro
+    depends_on:
+      - docker-dind
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/login || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+```
+
+**Save the file**:
+- Press `Ctrl + X`
+- Press `Y`
+- Press `Enter`
+
+### Create Dockerfile
+
+```bash
+nano Dockerfile
+```
+
+**Copy and paste this content**:
+
+```dockerfile
+FROM jenkins/jenkins:2.462-jdk17
+
+USER root
+
+# Install necessary packages and dependencies
+RUN apt-get update && apt-get install -y \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg \
+    lsb-release \
+    sudo \
+    vim \
+    git \
+    wget \
+    software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y docker-ce-cli docker-buildx-plugin docker-compose-plugin && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Docker Compose standalone
+RUN curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose && \
+    ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+
+# Install additional tools
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    jq \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add jenkins user to docker group
+RUN groupadd -f docker && usermod -aG docker jenkins
+
+# Give jenkins user sudo permissions (for specific docker commands)
+RUN echo "jenkins ALL=(ALL) NOPASSWD: /usr/bin/docker" >> /etc/sudoers
+
+# Switch to jenkins user
+USER jenkins
+
+# Install Jenkins plugins
+RUN jenkins-plugin-cli --plugins \
+    blueocean:1.27.9 \
+    docker-workflow:572.v950f58993843 \
+    docker-plugin:1.6.2 \
+    git:5.2.1 \
+    github:1.38.0 \
+    pipeline-stage-view:2.34 \
+    workflow-aggregator:596.v8c21c963d92d \
+    credentials-binding:631.v861e21b_2b_194 \
+    ssh-slaves:2.916.vd17b_43357ce4 \
+    timestamper:1.26 \
+    ws-cleanup:0.45 \
+    pipeline-utility-steps:2.16.2 \
+    configuration-as-code:1775.v810dc950b_514 \
+    job-dsl:1.87 \
+    matrix-auth:3.2.2 \
+    email-ext:2.105 \
+    mailer:463.vedf8358e006b_ \
+    slack:664.vc9a_90f8b_c24a_ \
+    prometheus:2.3.3
+
+# Set environment variables
+ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=true -Dhudson.model.DirectoryBrowserSupport.CSP="
+
+# Expose ports
+EXPOSE 8080 50000
+
+# Entry point
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/jenkins.sh"]
+```
+
+**Save the file**:
+- Press `Ctrl + X`
+- Press `Y`
+- Press `Enter`
+
+### Verify Files Created
+
+```bash
+# List files
+ls -la
+
+# Should see:
+# docker-compose.yml
+# Dockerfile
+```
+
+---
+
+## Step 6: Start Jenkins
+
+### Build and Start Containers
+
+```bash
+# Make sure you're in the jenkins-docker directory
+cd ~/jenkins-docker
+
+# Build and start Jenkins (this will take 5-10 minutes first time)
+docker-compose up -d --build
+```
+
+**Expected output**:
+```
+Creating network "jenkins-docker_jenkins-network" with driver "bridge"
+Creating volume "jenkins-docker_jenkins-data" with local driver
+Creating volume "jenkins-docker_jenkins-docker-certs" with local driver
+Building jenkins
+...
+Creating jenkins-docker ... done
+Creating jenkins-blueocean ... done
+```
+
+### Monitor Installation Progress
+
+```bash
+# Watch Jenkins logs (wait until you see "Jenkins is fully up and running")
+docker-compose logs -f jenkins
+```
+
+**Look for this message**:
+```
+jenkins-blueocean | *************************************************************
+jenkins-blueocean | Jenkins initial setup is required...
+jenkins-blueocean | *************************************************************
+jenkins-blueocean | Jenkins is fully up and running
+```
+
+**Press `Ctrl + C` to exit logs**
+
+### Verify Containers are Running
+
+```bash
+docker-compose ps
+```
+
+**Expected output**:
+```
+NAME                  STATUS    PORTS
+jenkins-blueocean     Up        0.0.0.0:8080->8080/tcp, 0.0.0.0:50000->50000/tcp
+jenkins-docker        Up        0.0.0.0:2376->2376/tcp
+```
+
+---
+
+## Step 7: Access Jenkins in Browser
+
+### Get Jenkins Initial Admin Password
+
+```bash
+# Get the password
+docker exec jenkins-blueocean cat /var/jenkins_home/secrets/initialAdminPassword
+```
+
+**Copy this password** (it looks like: `a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`)
+
+### Open Jenkins in Chrome
+
+1. **Open Chrome browser**
+
+2. **Navigate to**: `http://YOUR-EC2-PUBLIC-IP:8080`
+   - Replace `YOUR-EC2-PUBLIC-IP` with your actual EC2 public IP
+   - Example: `http://54.123.45.67:8080`
+
+3. **You should see**: "Unlock Jenkins" page
+
+---
+
+## Step 8: Complete Initial Setup
+
+### Unlock Jenkins
+
+1. **Paste the password** you copied earlier
+2. **Click "Continue"**
+
+### Install Plugins
+
+1. **Select**: "Install suggested plugins" (recommended)
+   - OR "Select plugins to install" (for custom selection)
+
+2. **Wait**: 5-10 minutes for plugins to install
+
+### Create First Admin User
+
+1. **Fill in the form**:
+   - Username: `admin` (or your choice)
+   - Password: `YourStrongPassword123!`
+   - Confirm password: `YourStrongPassword123!`
+   - Full name: `Your Name`
+   - Email: `your.email@example.com`
+
+2. **Click "Save and Continue"**
+
+### Instance Configuration
+
+1. **Jenkins URL**: Should show `http://YOUR-EC2-IP:8080/`
+2. **Click "Save and Finish"**
+
+### Start Using Jenkins
+
+1. **Click "Start using Jenkins"**
+2. **You should see**: Jenkins Dashboard with BlueOcean UI
+
+---
+
+## 🎉 Success! Jenkins is Now Running
+
+### Quick Test - Create a Test Job
+
+1. **Click "New Item"** (left sidebar)
+2. **Enter name**: `test-docker`
+3. **Select**: "Pipeline"
+4. **Click "OK"**
+5. **Scroll to "Pipeline" section**
+6. **Paste this script**:
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('Test Docker') {
+            steps {
+                sh 'docker --version'
+                sh 'docker-compose --version'
+                sh 'java -version'
+                sh 'git --version'
+            }
+        }
+        stage('Test Docker Commands') {
+            steps {
+                sh 'docker ps'
+                sh 'docker images'
+            }
+        }
+    }
+}
+```
+
+7. **Click "Save"**
+8. **Click "Build Now"**
+9. **Click on build #1** → **Console Output**
+10. **Verify**: All commands execute successfully ✅
+
+---
+
+## 🛠️ Useful Management Commands
+
+### Stop Jenkins
+```bash
+cd ~/jenkins-docker
+docker-compose down
+```
+
+### Start Jenkins
+```bash
+cd ~/jenkins-docker
+docker-compose up -d
+```
+
+### Restart Jenkins
+```bash
+cd ~/jenkins-docker
+docker-compose restart
+```
+
+### View Logs
+```bash
+# All logs
+docker-compose logs -f
+
+# Jenkins only
+docker-compose logs -f jenkins
+
+# Docker-in-Docker only
+docker-compose logs -f docker-dind
+```
+
+### Access Jenkins Container Shell
+```bash
+docker exec -it jenkins-blueocean bash
+```
+
+### Check Disk Space
+```bash
+df -h
+docker system df
+```
+
+### Backup Jenkins Data
+```bash
+# Create backup directory
+mkdir -p ~/jenkins-backups
+
+# Backup
+docker run --rm \
+  -v jenkins-docker_jenkins-data:/data \
+  -v ~/jenkins-backups:/backup \
+  ubuntu tar czf /backup/jenkins-backup-$(date +%Y%m%d).tar.gz /data
+
+# List backups
+ls -lh ~/jenkins-backups/
+```
+
+### Restore Jenkins Data
+```bash
+# Stop Jenkins
+cd ~/jenkins-docker
+docker-compose down
+
+# Restore from backup
+docker run --rm \
+  -v jenkins-docker_jenkins-data:/data \
+  -v ~/jenkins-backups:/backup \
+  ubuntu bash -c "cd /data && tar xzf /backup/jenkins-backup-YYYYMMDD.tar.gz --strip 1"
+
+# Start Jenkins
+docker-compose up -d
+```
+
+---
+
+## 🔒 Security Recommendations
+
+### 1. Change Default Admin Password
+- Go to: User icon (top right) → Configure → Password
+
+### 2. Enable Matrix-based Security
+- Manage Jenkins → Security → Authorization
+- Select "Matrix-based security"
+
+### 3. Install Security Plugins
+- Manage Jenkins → Plugins → Available
+- Install: "OWASP Markup Formatter", "Audit Trail"
+
+### 4. Restrict Security Group (AWS)
+- Edit Security Group
+- Change port 8080 source from `0.0.0.0/0` to `Your IP`
+
+### 5. Set Up Backup Cron Job
+```bash
+# Edit crontab
+crontab -e
+
+# Add daily backup at 2 AM
+0 2 * * * cd ~/jenkins-docker && docker run --rm -v jenkins-docker_jenkins-data:/data -v ~/jenkins-backups:/backup ubuntu tar czf /backup/jenkins-backup-$(date +\%Y\%m\%d).tar.gz /data
+```
+
+---
+
+## 🐛 Troubleshooting
+
+### Jenkins Won't Start
+
+```bash
+# Check logs
+docker-compose logs jenkins
+
+# Check if port 8080 is already in use
+sudo netstat -tulpn | grep 8080
+
+# Remove and recreate containers
+docker-compose down
+docker-compose up -d --build
+```
+
+### Can't Access Jenkins in Browser
+
+1. **Check Security Group** - Port 8080 should be open
+2. **Check container status**: `docker-compose ps`
+3. **Check EC2 instance public IP hasn't changed**
+4. **Try**: `curl http://localhost:8080` from EC2 instance
+
+### Docker Permission Denied
+
+```bash
+# Add user to docker group again
+sudo usermod -aG docker $USER
+
+# Logout and login
+exit
+# SSH back in
+```
+
+### Out of Disk Space
+
+```bash
+# Check disk usage
+df -h
+
+# Clean up Docker
+docker system prune -a --volumes
+
+# Clean up old logs
+sudo journalctl --vacuum-time=7d
+```
+
+---
+
+## 📚 Next Steps
+
+1. **Configure Jenkins**:
+   - Install additional plugins
+   - Set up authentication (LDAP, GitHub, etc.)
+   - Configure email notifications
+
+2. **Create CI/CD Pipelines**:
+   - Connect to GitHub/GitLab
+   - Set up webhooks
+   - Create automated build pipelines
+
+3. **Set Up SSL** (Production):
+   - Use Nginx reverse proxy
+   - Get Let's Encrypt certificate
+   - Configure HTTPS
+
+4. **Scale Jenkins**:
+   - Add Jenkins agents
+   - Configure cloud agents (EC2, Docker)
+   - Set up distributed builds
+
+---
+
+## 🎯 Summary
+
+✅ AWS EC2 instance configured
+✅ Docker and Docker Compose installed
+✅ Jenkins running in Docker containers
+✅ Accessible from Chrome browser
+✅ Docker-in-Docker configured for CI/CD
+✅ Persistent data with volumes
+✅ BlueOcean UI enabled
+
+**Your Jenkins is now ready for CI/CD pipelines!** 🚀
